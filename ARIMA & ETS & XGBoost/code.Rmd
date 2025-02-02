@@ -1,0 +1,312 @@
+```{r setup}
+library(doParallel)
+library(foreach)
+library(dplyr)
+library(Rfast)
+library(forecast)
+library(magrittr)
+library(glmnet)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+source("function/find_C.R")
+source("function/xg.R")
+#Select the data set and base forecast method
+dataset_index<-4
+f_method='xg' #options: arima, xg, ets
+dataset_name=c('Traffic','Wiki2','Labour','TourismSmall')[[dataset_index]]
+h=c(14,14,8,4)[[dataset_index]]
+freq=c(7,7,12,4)[[dataset_index]]
+num_of_cores=detectCores()-1
+path=paste0("./dataset/",dataset_name);file_d=paste0(path,'/data.csv');file_S=paste0(path,'/agg_mat.csv')
+d <- read.csv(file_d)[,-1]
+read_result<-readS(file_S)
+S<-read_result[[1]]
+#n: total number of nodes
+n<-read_result[[2]]
+#na: number of aggregated nodes
+na<-read_result[[3]];nb<-n-na
+len1=dim(d)[1]
+train_Len<-floor(len1*0.7);valid_Len<-floor(len1*0.8)+1;weigh_Len<-floor(len1*0.3)
+```
+
+```{r cal_C_matrix}
+C<-matrix(0, ncol = n, nrow = 0)
+l=c()
+for (i in (na+1):n){
+  C_temp<-find_C(S,rownames(S)[i],n,na)
+  C<-rbind(C,C_temp)
+  l=c(l,dim(C_temp)[1])
+  cat(i,' ')
+}
+C=as.matrix(C)
+```
+
+```{r generate_base_forecast}
+Base_forecast_predict <- function(input_data, freq, f_method, h, num_cores){
+  n<-dim(input_data)[2]
+  if (f_method == "arima"){
+    library(forecast)
+    library(foreach)
+    library(doParallel)
+    cl <- makeCluster(num_cores)
+    registerDoParallel(cl)
+    predict_results <- foreach(i = 1:n, .packages = c("forecast")) %dopar% {
+      x <- ts(input_data[, i], frequency = freq)
+      prediction<-forecast(auto.arima(x), h=h)
+      return (prediction$mean)
+    }
+    stopCluster(cl)
+  } else if (f_method == "ets"){
+    library(forecast)
+    library(foreach)
+    library(doParallel)
+    cl <- makeCluster(num_cores)
+    registerDoParallel(cl)
+    predict_results <- foreach(i = 1:n, .packages = c("forecast")) %dopar% {
+      x <- ts(input_data[, i], frequency = freq)
+      prediction<-forecast(ets(x), h=h)
+      return (prediction$mean)
+    }
+    stopCluster(cl)
+  } else if (f_method == "xg"){
+    prediction <- forecast.xg(input_data, h=h, lags=2*freq)
+    predict_results <- prediction$predict
+    return (predict_results)
+  }
+  result_to_return<-matrix(nrow=h,ncol=0)
+  for (i in 1:length(predict_results)){
+    result_to_return<-cbind( result_to_return , matrix(predict_results[[i]]) )
+  }
+  return (result_to_return)
+}
+Base_forecast_train <- function(input_data, freq, f_method, h, num_cores){
+  n<-dim(input_data)[2]
+  if (f_method == "arima"){
+    library(forecast)
+    library(foreach)
+    library(doParallel)
+    cl <- makeCluster(num_cores)
+    registerDoParallel(cl)
+    predict_results <- foreach(i = 1:n, .packages = c("forecast")) %dopar% {
+      x <- ts(input_data[, i], frequency = freq)
+      prediction<-forecast(auto.arima(x), h=h)
+      return (prediction)
+    }
+    stopCluster(cl)
+  } else if (f_method == "ets"){
+    library(forecast)
+    library(foreach)
+    library(doParallel)
+    cl <- makeCluster(num_cores)
+    registerDoParallel(cl)
+    predict_results <- foreach(i = 1:n, .packages = c("forecast")) %dopar% {
+      x <- ts(input_data[, i], frequency = freq)
+      prediction<-forecast(ets(x), h=h)
+      return (prediction)
+    }
+    stopCluster(cl)
+  } else if (f_method == "xg"){
+    prediction <- forecast.xg(input_data, h=h, lags=3*freq)
+    fit_to_return <- prediction$fit
+    res_to_return <- prediction$residual
+    return (list(fit_to_return,res_to_return))
+  }
+  fit_to_return<-matrix(nrow=train_Len,ncol=0)
+  res_to_return<-matrix(nrow=train_Len,ncol=0)
+  for (i in 1:length(predict_results)){
+    result_i<-predict_results[[i]]
+    fit_to_return<-cbind( fit_to_return , matrix(result_i$fitted) )
+    res_to_return<-cbind( res_to_return , matrix(result_i$residual) )
+  }
+  return (list(fit_to_return,res_to_return))
+}
+
+#generate data for training weights, X_glm and Y_glm correspond to y and X of formula (19) in the paper.
+X_glm<-matrix(NA,nrow=0,ncol=na*nb)
+Y_glm<-matrix(NA,nrow=0,ncol=1)
+#training data
+trD<- d[ 1:train_Len ,,drop=FALSE] %>% as.matrix()  %>% unname()
+#generate base forecast for training data(fitted value and residuals)
+base_f=Base_forecast_train(trD, freq=freq, f_method=f_method, h=h, num_cores=num_of_cores)
+fit<-base_f[[1]];res<-base_f[[2]]
+#convert the base forecast to X and y
+for (t in 1:nrow(fit)){
+  cat(t,'')
+  yct0<-fit[t,(na+1):n,drop=FALSE]
+  yctd<-matrix(0, ncol = na*nb, nrow = nb)
+  for (nbi in 1:nb){
+    C_delta_i<-C[((nbi-1)*(na+1)+2):(nbi*(na+1)), ,drop=FALSE];
+    yictd<-C_delta_i %*% t(fit[t, ,drop=FALSE]) - yct0[,nbi]
+    yctd[nbi,((nbi-1)*na+1):(nbi*na)]<-t(yictd)
+  }
+  X<-S%*%yctd
+  Y<-t(trD[t,,drop=FALSE]) - S %*% t(yct0)
+  X_glm<-rbind(X_glm,X);Y_glm<-rbind(Y_glm,Y)
+}
+```
+
+```{r train_weight_for_different_lambda}
+Weight_train <- function(X_glm, Y_glm ,penalty=NULL, lambda=0){
+  if (penalty=='L1') {alpha=1} else if (penalty=='L2') {alpha=0} else {lambda=0}
+  model_w<-glmnet(X_glm,Y_glm,family = "gaussian",intercept = FALSE, 
+                      alpha = alpha, lambda = lambda)
+  return (coef(model_w)[-1])
+}
+cal_Phi<-function(w){#Convert a bar w to a Phi matrix
+  len<-length(w)+nb
+  rankk<-length(w)/nb
+  w_L1<-matrix(NA,nrow=len,ncol=1)
+  for (i in 1:nb){
+    w_L1[((rankk+1)*(i-1)+2):((rankk+1)*i),1]<-w[(rankk*(i-1)+1):(rankk*i)]
+    w_L1[(rankk+1)*(i-1)+1,1]<-1-sum(w[(rankk*(i-1)+1):(rankk*i)])
+  }
+  start_indices <- (1:nb-1)*(na+1)+1
+  Phi=matrix(0,nrow =nb,ncol = (na+1)*nb )
+  for (r in 1: nb) {
+    col_start=start_indices[r]
+    col_end=start_indices[r]+l[r]-1
+    Phi[r,col_start:col_end]=w_L1[col_start:col_end,1]
+  }
+  return (Phi)
+}
+#define a function to compute an inverse matrix
+inver<-function(matrix) {
+  library(MASS)
+  tryCatch({
+    # Try to compute an ordinary inverse matrix using solve
+    inv_matrix <- solve(matrix)
+    inv_matrix
+  }, error = function(e) {
+    message("Ordinary inverse failed, using generalized inverse instead.")
+    tryCatch({
+      # Try to compute generalized inverse matrices using ginv
+      inv_matrix <- ginv(matrix)
+      inv_matrix
+    }, error = function(e) {
+      # If ginv also fails, return the identity matrix
+      message("Generalized inverse also failed, returning identity matrix instead.")
+      inv_matrix <- diag(nrow(matrix))
+      inv_matrix  
+    })
+  })
+}
+
+#L1 regularization: Calculate w corresponding to different lambda
+nlambda_L1<-24; lambda_L1.seq<-c(0,1:20*20,10^(6:8/2)); w_matrix_L1<-matrix(NA,nrow=0,ncol=na*nb)
+for (i in 1:nlambda_L1){
+  lambda<-lambda_L1.seq[i];  cat(lambda,'')
+  w_matrix_L1<-rbind(w_matrix_L1,Weight_train(X_glm, Y_glm ,penalty='L1', lambda=lambda))
+}
+#L2 regularization: Calculate w corresponding to different lambda
+nlambda_L2<-21; lambda_L2.seq<-c(0,10^(1:20*2.5)); w_matrix_L2<-matrix(NA,nrow=0,ncol=na*nb)
+for (i in 1:nlambda_L2){
+  lambda<-lambda_L2.seq[i];  cat(lambda,'')
+  w_matrix_L2<-rbind(w_matrix_L2,Weight_train(X_glm, Y_glm ,penalty='L2', lambda=lambda))
+}
+```
+
+```{r validation_to_select_best_lambda}
+#Generate the base forecast for the validation set
+n_validation<-valid_Len-train_Len-h+1
+bf_val<-matrix(NA,nrow=0,ncol=n)
+for (i in 1:n_validation){
+  cat(i,'')
+  x_matrix<-d[i:(train_Len+i-1), ,drop=FALSE] %>% as.matrix()  %>% unname()
+  predict<-Base_forecast_predict(x_matrix, freq=freq, f_method=f_method, h=h, num_cores=num_of_cores)
+  realvalue<-d[(train_Len+i):(train_Len+i+h-1), ,drop=FALSE] %>% as.matrix()  %>% unname()
+  bf_val<-rbind(bf_val,predict)
+}
+#Evaluate the performance of different lambdas on the validation set (L1 penalty)
+smape_to_lambda_L1<-matrix(NA,nrow=nlambda_L1,ncol=n_validation)
+for (i in 1:n_validation){
+  cat(i,'')
+  bf_tmp<-bf_val[((i-1)*h+1):(i*h),,drop=FALSE]
+  realvalue<-d[(train_Len+i):(train_Len+i+h-1), ,drop=FALSE] %>% as.matrix()  %>% unname()
+  for (lambda_i in 1:nlambda_L1){
+    w0<-w_matrix_L1[lambda_i,,drop=FALSE]
+    Phi<-cal_Phi(w0)
+    fitvalue<-t(S%*%Phi%*%C%*%t(bf_tmp))
+    smape<-mean( 200/h*colSums( abs(realvalue-fitvalue)/(abs(realvalue)+abs(fitvalue)) ) )
+    smape_to_lambda_L1[lambda_i,i]<-smape
+  }
+}
+plot(log(lambda_L1.seq),rowMeans(smape_to_lambda_L1)) #show the curve
+
+#Evaluate the performance of different lambdas on the validation set (L2 penalty)
+smape_to_lambda_L2<-matrix(NA,nrow=nlambda_L2,ncol=n_validation)
+for (i in 1:n_validation){
+  cat(i,'')
+  bf_tmp<-bf_val[((i-1)*h+1):(i*h),,drop=FALSE]
+  realvalue<-d[(train_Len+i):(train_Len+i+h-1), ,drop=FALSE] %>% as.matrix()  %>% unname()
+  for (lambda_i in 1:nlambda_L2){
+    w0<-w_matrix_L2[lambda_i,,drop=FALSE]
+    Phi<-cal_Phi(w0)
+    fitvalue<-t(S%*%Phi%*%C%*%t(bf_tmp))
+    smape<-mean( 200/h*colSums( abs(realvalue-fitvalue)/(abs(realvalue)+abs(fitvalue)) ) )
+    smape_to_lambda_L2[lambda_i,i]<-smape
+  }
+}
+plot(log(lambda_L2.seq),rowMeans(smape_to_lambda_L2)) #show the curve
+
+
+#Calculate Phi or P under different methods
+##our method & L1
+lambda_L1.best<-lambda_L1.seq[which.min(rowMeans(smape_to_lambda_L1))]
+Phi_L1.best<-cal_Phi(w_matrix_L1[which.min(rowMeans(smape_to_lambda_L1)),,drop=FALSE])
+##our method & L2
+lambda_L2.best<-lambda_L2.seq[which.min(rowMeans(smape_to_lambda_L2))]
+Phi_L2.best<-cal_Phi(w_matrix_L2[which.min(rowMeans(smape_to_lambda_L2)),,drop=FALSE])
+##bottom-up
+Phi_Na.best<-cal_Phi(w_matrix_L1[1,,drop=FALSE]*0)#
+##MinT
+var_cov<-diag(diag(cov(res)));inv<-inver(var_cov)
+G_wls=inver(t(S)%*%inv%*%S)%*%t(S)%*%inv
+##OLS
+G_ols=inver(t(S)%*%S)%*%t(S)
+##Hollyman's method
+source("function/hollyman_comb.R")
+C_lessdf<-compute_C(S)
+var_cov<-cov(res);var_cov_y_c=C_lessdf%*%var_cov%*%t(C_lessdf)
+Phi_lessdf=compute_Phi_lessdf(S,var_cov_y_c)
+```
+
+```{r compare_and_evaluate_on_test_sets}
+#Generate the base forecast for the test set
+n_test<-len1-valid_Len-h+1
+bf_test<-matrix(NA,nrow=0,ncol=n)
+for (i in 1:n_test){
+  cat(i,'')
+  x_matrix<-d[i:(valid_Len+i-1), ,drop=FALSE] %>% as.matrix()  %>% unname()
+  predict<-Base_forecast_predict(x_matrix, freq=freq, f_method=f_method, h=h, num_cores=num_of_cores)
+  bf_test<-rbind(bf_test,predict)
+}
+
+#Calculate the SMAPE of different methods on the test set
+smape_test<-matrix(NA,nrow=0,ncol=6)
+for (i in 1:n_test){
+  cat(i,'')
+  bf_tmp<-bf_test[((i-1)*h+1):(i*h),,drop=FALSE]
+  realvalue<-d[(valid_Len+i):(valid_Len+i+h-1), ,drop=FALSE] %>% as.matrix()  %>% unname()
+  
+  fitvalue_lessDF<-t(S%*%Phi_lessdf%*%C_lessdf%*%t(bf_tmp))
+  fitvalue_L1<-t(S%*%Phi_L1.best%*%C%*%t(bf_tmp))
+  fitvalue_L2<-t(S%*%Phi_L2.best%*%C%*%t(bf_tmp))
+  fitvalue_wls<-t(S%*%G_wls%*%t(bf_tmp))
+  fitvalue_Na<-t(S%*%Phi_Na.best%*%C%*%t(bf_tmp))
+  fitvalue_ols<-t(S%*%G_ols%*%t(bf_tmp))
+  #calculate smape
+  smape_lessdf<-mean( 200/h*colSums( abs(realvalue-fitvalue_lessDF)/(abs(realvalue)+abs(fitvalue_lessDF)) ) )
+  smape_L1<-mean( 200/h*colSums( abs(realvalue-fitvalue_L1)/(abs(realvalue)+abs(fitvalue_L1)) ) )
+  smape_L2<-mean( 200/h*colSums( abs(realvalue-fitvalue_L2)/(abs(realvalue)+abs(fitvalue_L2)) ) )
+  smape_wls<-mean( 200/h*colSums( abs(realvalue-fitvalue_wls)/(abs(realvalue)+abs(fitvalue_wls)) ) )
+  smape_Na<-mean( 200/h*colSums( abs(realvalue-fitvalue_Na)/(abs(realvalue)+abs(fitvalue_Na)) ) )
+  smape_ols<-mean( 200/h*colSums( abs(realvalue-fitvalue_ols)/(abs(realvalue)+abs(fitvalue_ols)) ) )
+  smape_test<-rbind(smape_test,c(smape_lessdf,smape_L1,smape_L2,smape_wls,smape_Na,smape_ols))
+}
+
+Result<-data.frame(SMAPE=colMeans(smape_test)); rownames(Result)<-c("Hollyman","L1","L2",
+                                                                  "MinT","Bottom-Up","OLS")
+cat(paste0('Data Set: ',dataset_name,'\nBase Forecast Method: ',f_method,
+           '\nBest L1 Lambda: ',lambda_L1.best,
+           '\nBest L2 Lambda: ',lambda_L2.best,'\n'));print(as.matrix(Result))
+
+```
