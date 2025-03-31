@@ -1,55 +1,6 @@
-# DeepVARwT: Deep Learning for a VAR Model with Trend (Li and Yuan, 2022)
+# Enhancing Forecast Reconciliation Performance through Model Combination
 ## Introduction
-We propose a new approach called DeepVARwT that employs deep learning methodology for maximum likelihood estimation of the trend and the dependence structure at the same time. A Long Short-Term Memory (LSTM) network is used for this purpose. To ensure the stability of the model, we enforce the causality condition on the autoregressive coefficients using the transformation of Ansley & Kohn (1986). 
 
-Authors
--------
-
--   [Xixi Li](https://lixixibj.github.io/)
--   [Jingsong Yuan](https://www.research.manchester.ac.uk/portal/jingsong.yuan.html)
-
-## Project structure
-This repository contains python code and data used to reproduce results in a simulation study and real data applications.
-
-Here, we brifely introduce some important `.py` files in this project.
-
-- `_main_for_para_estimation_parallel.py`: main code for 100 parameter estimation in a simulation study.
-- `lstm_network.py`: set up an LSTM network to generate trend and VAR parameters.
-- `custom_loss.py`: evaluate log-likelihood function.
-- `_model_fitting_for_real_data.py`: model fitting for real data.
-- `_main_make_predictions_for_real_data.py`: make predictions using the fitted model.
-
-
-## Preliminaries
-All code was implemented using 
-[![Python v3.6.15](https://img.shields.io/badge/python-v3.6.15-blue.svg)](https://www.python.org/downloads/release/python-3615/), and Pytorch was used for network training.
-
-Installation in a virtual environment is recommended:
-```
-#install python with version 3.6.15
-conda create --name python36 python=3.6.15
-conda activate python36
-pip install --upgrade typing-extensions
-#install pytorch with version 1.10.2
-pip install torch==1.10.2 torchvision==0.11.3 torchaudio==0.10.2 -f https://download.pytorch.org/whl/cpu/torch_stable.html
-
-```
-
-The additonal installation of other packages with specific versions can be implemented using
-```
-pip install pandas==1.1.5 
-pip install packaging==21.3 
-pip install matplotlib==3.3.4
-pip install statsmodels==0.12.2
-pip install joblib
-```
-## Usage
-#### Simulation study
-The following code will do 100 parameter estimation on simulated three-diemnsional VAR(2) procoesses
-```
-python _main_for_para_estimation_parallel.py
-```
-The training loss function values, estimated trends and pretrained-model file will be saved in the folder `simulation-res/100-res/`.
 #### US macroeconomics series 1
 The following code will make predictions from 20 training samples
 ```
