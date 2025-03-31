@@ -132,10 +132,4 @@ num of parameters
 Time:  3905.2921762170736
 ```
 
-References
-----------
-
-- Xixi Li, Jingsong Yuan (2022).  DeepVARwT: Deep Learning for a VAR Model with Trend.  [Working paper](https://arxiv.org/abs/2209.10587).
-
-
 
